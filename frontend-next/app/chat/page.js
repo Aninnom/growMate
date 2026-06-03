@@ -4,104 +4,117 @@ import { useState, useRef, useEffect } from "react";
 import PlantCharacter from "@/components/PlantCharacter";
 import Pill from "@/components/Pill";
 import { SendIcon } from "@/components/Icons";
-import { initialMessages, promptChips, getPlantReply } from "@/lib/data/chat";
+import { promptChips } from "@/lib/data/chat";
+import { streamMessage, getMessages } from "@/lib/api";
 import styles from "./chat.module.css";
 
-
-function nowLabel() {
-  const d = new Date();
-  let h = d.getHours();
-  const m = d.getMinutes().toString().padStart(2, "0");
+function formatTime(date) {
+  let h = date.getHours();
+  const m = date.getMinutes().toString().padStart(2, "0");
   const ap = h < 12 ? "오전" : "오후";
   h = h % 12 || 12;
   return `${ap} ${h}:${m}`;
 }
 
+function nowLabel() {
+  return formatTime(new Date());
+}
+
+// ISO 문자열(UTC) → "오후 5:08" 라벨
+function labelFromISO(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d) ? "" : formatTime(d);
+}
+
+// 첫 인사 (시각은 hydration mismatch 방지를 위해 비워둔다). 저장되지 않는 정적 메시지.
+const GREETING = {
+  id: "greeting",
+  role: "plant",
+  text: "안녕하세요! 오늘 하루는 어땠어요? 편하게 이야기해 주세요 🌿",
+  time: "",
+};
+
 export default function ChatPage() {
-  const [messages, setMessages] = useState(initialMessages);
+  const [messages, setMessages] = useState([GREETING]);
   const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false); // 응답 스트리밍 중
   const scrollRef = useRef(null);
-  // 새 메시지 고유 id 카운터 (Date.now 대신 — 렌더 순수성 유지). 초기 mock id 와 겹치지 않게 시작값을 둠
-  const idRef = useRef(initialMessages.length);
+  const idRef = useRef(0); // 새 메시지용 로컬 카운터 (id 는 'local-N' 문자열)
+
+  // 마운트 시 저장된 대화 기록을 불러온다 → 페이지 이동/새로고침 후에도 유지.
+  useEffect(() => {
+    let alive = true;
+    getMessages()
+      .then((saved) => {
+        if (!alive || !Array.isArray(saved) || saved.length === 0) return;
+        const loaded = saved.map((m) => ({
+          id: m.id,
+          role: m.role,
+          text: m.text,
+          time: labelFromISO(m.createdAt),
+        }));
+        setMessages([GREETING, ...loaded]);
+      })
+      .catch((e) => console.error("대화 기록 불러오기 실패:", e));
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
-async function send(text) {
+  async function send(text) {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed || busy) return;
 
-    // 1. 유저 메시지 화면에 띄우기 (원본 유지)
     const time = nowLabel();
-    const userMsg = { id: (idRef.current += 1), role: "user", text: trimmed, time };
-    setMessages((prev) => [...prev, userMsg]);
+    const userMsg = { id: `local-${(idRef.current += 1)}`, role: "user", text: trimmed, time };
+    const plantId = `local-${(idRef.current += 1)}`;
+    const plantMsg = { id: plantId, role: "plant", text: "", time };
+
+    // 직전 대화(history)는 사용자 메시지를 추가하기 전 상태로 구성
+    const history = messages.map((m) => ({ from: m.role, text: m.text }));
+
+    setMessages((prev) => [...prev, userMsg, plantMsg]);
     setInput("");
+    setBusy(true);
 
-    // 2. 식물 메시지 '빈 칸' 미리 만들기 (여기서 plantId를 확실하게 선언!)
-    const plantId = (idRef.current += 1);
-    const plantMsg = {
-        id: plantId,
-        role: "plant",
-        text: "",
-        time,
-    };
-    setMessages((prev) => [...prev, plantMsg]);
+    // 토큰이 올 때마다 plant 메시지 텍스트에 이어붙인다 → 타이핑 효과
+    const appendToken = (tok) =>
+      setMessages((prev) =>
+        prev.map((m) => (m.id === plantId ? { ...m, text: m.text + tok } : m))
+      );
 
-    // 3. 파이썬 서버와 통신 시작
-    try {
-        const response = await fetch('http://localhost:8000/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                message: trimmed,
-                sensor: { temp: 24, humidity: 45, soil: 20 },
-                history: messages.map(m => ({ from: m.role, text: m.text }))
-            }),
-        });
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const dataStr = line.replace('data: ', '').trim();
-                    if (!dataStr) continue;
-
-                    const data = JSON.parse(dataStr);
-                    if (data.done) break;
-
-                    if (data.token) {
-                        // 위에서 꽉 잡아둔 plantId를 여기서 안전하게 사용!
-                        setMessages((prev) =>
-                            prev.map((msg) =>
-                                msg.id === plantId
-                                    ? { ...msg, text: msg.text + data.token }
-                                    : msg
-                            )
-                        );
-                    }
-                }
-            }
-        }
-    } catch (error) {
-        console.error('LLM API 에러:', error);
-        setMessages((prev) =>
-            prev.map((msg) =>
-                msg.id === plantId
-                    ? { ...msg, text: "서버와 연결이 끊어졌어요 ㅠㅠ" }
-                    : msg
+    await streamMessage(
+      { message: trimmed, history },
+      {
+        onToken: appendToken,
+        onDone: (full) => {
+          // 혹시 토큰 누락 시 전체 텍스트로 보정
+          if (full) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === plantId && m.text !== full ? { ...m, text: full } : m))
+            );
+          }
+          setBusy(false);
+        },
+        onError: (err) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === plantId
+                ? { ...m, text: "지금은 대답하기 어려워요 ㅠ 잠시 후 다시 말 걸어줄래요?" }
+                : m
             )
-        );
-    }
-}
+          );
+          console.error("채팅 오류:", err);
+          setBusy(false);
+        },
+      }
+    );
+  }
 
   function handleSubmit(e) {
     e.preventDefault();
@@ -133,8 +146,10 @@ async function send(text) {
                 <PlantCharacter size={30} mood="happy" />
               </span>
               <div className={styles.colLeft}>
-                <div className={`${styles.bubble} ${styles.plantBubble}`}>{m.text}</div>
-                <span className={styles.time}>{m.time}</span>
+                <div className={`${styles.bubble} ${styles.plantBubble}`}>
+                  {m.text || <span className={styles.typing}>…</span>}
+                </div>
+                {m.time && <span className={styles.time}>{m.time}</span>}
               </div>
             </div>
           ) : (
@@ -165,8 +180,9 @@ async function send(text) {
           onChange={(e) => setInput(e.target.value)}
           placeholder="오늘의 감정을 이야기해보세요"
           aria-label="메시지 입력"
+          disabled={busy}
         />
-        <button type="submit" className={styles.sendBtn} aria-label="전송">
+        <button type="submit" className={styles.sendBtn} aria-label="전송" disabled={busy}>
           <SendIcon size={20} />
         </button>
       </form>
