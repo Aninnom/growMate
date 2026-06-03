@@ -1,5 +1,6 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import Toggle from "@/components/Toggle";
 import PlantCharacter from "@/components/PlantCharacter";
 import { ChevronRight } from "@/components/Icons";
@@ -10,15 +11,15 @@ import {
   systemMenu,
   profile,
 } from "@/lib/data/settings";
+import { getSettings, updateSettings } from "@/lib/api";
 import styles from "./settings.module.css";
 
-function ToggleRow({ label, value }) {
+// 토글 한 줄. 값은 부모가 소유(controlled)하고, 바꾸면 백엔드에 저장한다.
+function ToggleRow({ label, value, onChange }) {
   return (
     <div className={styles.row}>
       <span className={styles.rowLabel}>{label}</span>
-      {/* TODO(API): onChange 시 updateSettings({...}) 호출해 저장. 현재는 비제어라 저장 안 됨.
-          초기값도 getSettings()로 받아 controlled 로 전환 필요. lib/api/settings.js, docs/api.md §4.2 */}
-      <Toggle defaultOn={value} />
+      <Toggle on={!!value} onChange={onChange} />
     </div>
   );
 }
@@ -33,6 +34,35 @@ function Section({ title, children }) {
 }
 
 export default function SettingsPage() {
+  // settings: { notify:{...}, care:{...}, chat:{...} } — 백엔드 DB 값
+  const [settings, setSettings] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    getSettings()
+      .then((s) => alive && setSettings(s))
+      .catch((e) => console.error("설정 불러오기 실패:", e));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // group: 'notify'|'care'|'chat', key: 항목 키, next: 새 boolean
+  function handleToggle(group, key, next) {
+    // 낙관적 업데이트 → 화면 즉시 반영
+    setSettings((prev) => ({ ...prev, [group]: { ...prev[group], [key]: next } }));
+    updateSettings({ [group]: { [key]: next } }).catch((e) => {
+      console.error("설정 저장 실패:", e);
+      // 실패 시 되돌리기
+      setSettings((prev) => ({ ...prev, [group]: { ...prev[group], [key]: !next } }));
+    });
+  }
+
+  // 아직 로딩 전이면 기본값(false)로 보이도록 빈 객체 대비
+  const notify = settings?.notify ?? {};
+  const care = settings?.care ?? {};
+  const chat = settings?.chat ?? {};
+
   return (
     <div>
       <h1 className="screen-title">설정</h1>
@@ -53,14 +83,24 @@ export default function SettingsPage() {
       {/* 알림 설정 */}
       <Section title="알림 설정">
         {notifySettings.map((s) => (
-          <ToggleRow key={s.key} label={s.label} value={s.value} />
+          <ToggleRow
+            key={s.key}
+            label={s.label}
+            value={notify[s.key]}
+            onChange={(next) => handleToggle("notify", s.key, next)}
+          />
         ))}
       </Section>
 
       {/* 돌봄 모드 */}
       <Section title="돌봄 모드">
         {careSettings.map((s) => (
-          <ToggleRow key={s.key} label={s.label} value={s.value} />
+          <ToggleRow
+            key={s.key}
+            label={s.label}
+            value={care[s.key]}
+            onChange={(next) => handleToggle("care", s.key, next)}
+          />
         ))}
       </Section>
 
@@ -68,14 +108,21 @@ export default function SettingsPage() {
       <Section title="공감채팅 설정">
         {chatSettings.map((s) => {
           if (s.type === "toggle") {
-            return <ToggleRow key={s.key} label={s.label} value={s.value} />;
+            return (
+              <ToggleRow
+                key={s.key}
+                label={s.label}
+                value={chat[s.key]}
+                onChange={(next) => handleToggle("chat", s.key, next)}
+              />
+            );
           }
           if (s.type === "value") {
             return (
               <div key={s.key} className={styles.row}>
                 <span className={styles.rowLabel}>{s.label}</span>
                 <span className={styles.rowValue}>
-                  {s.value}
+                  {chat[s.key] ?? s.value}
                   <ChevronRight size={18} />
                 </span>
               </div>

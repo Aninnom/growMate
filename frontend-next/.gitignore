@@ -34,6 +34,9 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# 실수로 중첩 복제된 프로젝트 전체 클론 (커밋 금지)
+/growMate/
+
 # vercel
 .vercel
 

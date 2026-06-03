@@ -1,17 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import PlantCharacter from "@/components/PlantCharacter";
 import SpeechBubble from "@/components/SpeechBubble";
 import SensorCard from "@/components/SensorCard";
 import Pill from "@/components/Pill";
 import { BellIcon } from "@/components/Icons";
 import { plant } from "@/lib/data/plant";
-import { sensors } from "@/lib/data/sensors";
-import { suggestions as initialSuggestions } from "@/lib/data/suggestions";
+import { getSensors, getSuggestions, waterPlant, setLed, dismissSuggestion } from "@/lib/api";
 import styles from "./home.module.css";
-// TODO(API): 위 mock import 를 lib/api 호출로 교체 — getPlantStatus / getSensors / getSuggestions
-//   (useEffect + loading/error state 필요). docs/api.md §1
+// 제안·센서는 백엔드에서 가져온다. 센서는 라즈베리파이가 POST 한 최신값을 주기적으로 폴링한다.
+// 식물 상태(표정/문구)는 하드웨어 판정 전이라 아직 mock 을 사용한다.
+
+const SENSOR_POLL_MS = 10000; // 10초마다 센서 새로고침
 
 const TOUCH_LINES = [
   "히히, 간지러워요!",
@@ -21,13 +22,40 @@ const TOUCH_LINES = [
 ];
 
 export default function HomePage() {
-  const [suggestions, setSuggestions] = useState(initialSuggestions);
+  const [suggestions, setSuggestions] = useState([]);
+  const [sensors, setSensors] = useState([]);
   const [mood, setMood] = useState(plant.mood);
   const [touchMsg, setTouchMsg] = useState(null);
   const [wiggle, setWiggle] = useState(false);
   const [toast, setToast] = useState(null);
   // 조명: 처음엔 어두운 상태(조도 부족). LED를 켜면 밝아진다.
   const [ledOn, setLedOn] = useState(false);
+
+  // 활성 제안을 백엔드에서 불러온다. 처리한 제안은 서버에서 빠지므로 다시 뜨지 않는다.
+  useEffect(() => {
+    let alive = true;
+    getSuggestions()
+      .then((list) => alive && setSuggestions(list))
+      .catch((e) => console.error("제안 불러오기 실패:", e));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // 센서값을 주기적으로 폴링 → 라즈베리파이가 보낸 최신값이 홈에 반영된다.
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      getSensors()
+        .then((list) => alive && setSensors(list))
+        .catch((e) => console.error("센서 불러오기 실패:", e));
+    load();
+    const timer = setInterval(load, SENSOR_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, []);
 
   function handleTouch() {
     const line = TOUCH_LINES[Math.floor(Math.random() * TOUCH_LINES.length)];
@@ -37,22 +65,32 @@ export default function HomePage() {
     setTimeout(() => setWiggle(false), 600);
   }
 
-  function resolveSuggestion(id, accepted) {
+  async function resolveSuggestion(id, accepted) {
     const item = suggestions.find((s) => s.id === id);
+    if (!item) return;
+    // 낙관적으로 먼저 화면에서 제거 (서버 저장은 비동기로 진행)
     setSuggestions((prev) => prev.filter((s) => s.id !== id));
-    if (accepted && item) {
-      if (item.type === "water") {
-        // TODO(API): await waterPlant(id) → 펌프 작동. lib/api/actions.js, docs/api.md §1.4
-        setMood("happy");
-        setToast("물을 주었어요. 잎이 다시 생기를 찾고 있어요!");
+    try {
+      if (accepted) {
+        if (item.type === "water") {
+          await waterPlant(id); // 펌프 작동 + 제안 처리완료 저장
+          setMood("happy");
+          setToast("물을 주었어요. 잎이 다시 생기를 찾고 있어요!");
+        } else {
+          await setLed(true, id); // LED ON + 제안 처리완료 저장
+          setLedOn(true);
+          setToast("LED를 켰어요. 한결 환해졌어요!");
+        }
+        setTimeout(() => setToast(null), 2600);
       } else {
-        // TODO(API): await setLed(true) → LED ON. lib/api/actions.js, docs/api.md §1.5
-        setLedOn(true);
-        setToast("LED를 켰어요. 한결 환해졌어요!");
+        await dismissSuggestion(id); // [나중에] — 숨김 저장
       }
+    } catch (e) {
+      console.error("제안 처리 실패:", e);
+      // 실패 시 목록 복구
+      setSuggestions((prev) => (prev.some((s) => s.id === id) ? prev : [...prev, item]));
+      setToast("처리 중 문제가 생겼어요. 잠시 후 다시 시도해 주세요.");
       setTimeout(() => setToast(null), 2600);
-    } else if (item) {
-      // TODO(API): dismissSuggestion(id) → [나중에]. lib/api/suggestions.js, docs/api.md §1.6
     }
   }
 

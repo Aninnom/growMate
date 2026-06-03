@@ -20,8 +20,8 @@ export function waterPlant(suggestionId) {
   return apiFetch("/actions/water", { method: "POST", body: { suggestionId } });
 }
 
-// POST /actions/led — LED ON/OFF
-export function setLed(on) {
+// POST /actions/led — LED ON/OFF. suggestionId 를 주면 해당 제안을 처리완료로 마킹.
+export function setLed(on, suggestionId) {
   if (USE_MOCK) {
     return mockDelay({
       ok: true,
@@ -35,5 +35,5 @@ export function setLed(on) {
       },
     });
   }
-  return apiFetch("/actions/led", { method: "POST", body: { on } });
+  return apiFetch("/actions/led", { method: "POST", body: { on, suggestionId } });
 }
