@@ -97,6 +97,19 @@
   font-weight: 600;
 }
 
+/* 값 선택 드롭다운 (예: 감정 공감 톤) */
+.select {
+  border: none;
+  background: transparent;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--green-dark);
+  cursor: pointer;
+  padding: 4px 2px;
+  text-align: right;
+  text-align-last: right;
+}
+
 /* 하단 버튼 */
 .bottomBtns {
   margin-top: 28px;

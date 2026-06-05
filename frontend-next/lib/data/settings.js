@@ -14,11 +14,10 @@ export const careSettings = [
   { key: "showSuggest", label: "제안 메시지 표시", value: false },
 ];
 
-// 공감채팅 설정
+// 공감채팅 설정 (식물 별명은 프로필 화면과 중복되어 제거)
 export const chatSettings = [
   { key: "saveHistory", label: "대화 기록 저장", value: true, type: "toggle" },
   { key: "tone", label: "감정 공감 톤", value: "따뜻하게", type: "value" },
-  { key: "nickname", label: "식물 별명 설정", value: "", type: "chevron" },
 ];
 
 // 연결 및 시스템

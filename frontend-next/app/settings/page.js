@@ -15,6 +15,9 @@ import { getSettings, updateSettings } from "@/lib/api";
 import { useProfile } from "@/lib/hooks/useProfile";
 import styles from "./settings.module.css";
 
+// '감정 공감 톤' 선택지 — 탭할 때마다 순환한다.
+const TONE_OPTIONS = ["따뜻하게", "차분하게", "발랄하게", "담백하게"];
+
 // 토글 한 줄. 값은 부모가 소유(controlled)하고, 바꾸면 백엔드에 저장한다.
 function ToggleRow({ label, value, onChange }) {
   return (
@@ -58,6 +61,16 @@ export default function SettingsPage() {
       console.error("설정 저장 실패:", e);
       // 실패 시 되돌리기
       setSettings((prev) => ({ ...prev, [group]: { ...prev[group], [key]: !next } }));
+    });
+  }
+
+  // 값형 설정(예: 감정 공감 톤)을 리스트에서 고르면 저장.
+  function setValue(group, key, value) {
+    const prevValue = settings?.[group]?.[key];
+    setSettings((prev) => ({ ...prev, [group]: { ...prev[group], [key]: value } }));
+    updateSettings({ [group]: { [key]: value } }).catch((e) => {
+      console.error("설정 저장 실패:", e);
+      setSettings((prev) => ({ ...prev, [group]: { ...prev[group], [key]: prevValue } }));
     });
   }
 
@@ -121,13 +134,22 @@ export default function SettingsPage() {
             );
           }
           if (s.type === "value") {
+            const current = chat[s.key] ?? s.value;
             return (
               <div key={s.key} className={styles.row}>
                 <span className={styles.rowLabel}>{s.label}</span>
-                <span className={styles.rowValue}>
-                  {chat[s.key] ?? s.value}
-                  <ChevronRight size={18} />
-                </span>
+                <select
+                  className={styles.select}
+                  value={current}
+                  onChange={(e) => setValue("chat", s.key, e.target.value)}
+                  aria-label={s.label}
+                >
+                  {TONE_OPTIONS.map((opt) => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
               </div>
             );
           }

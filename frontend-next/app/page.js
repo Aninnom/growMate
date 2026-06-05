@@ -98,10 +98,16 @@ export default function HomePage() {
     }
   }
 
+  // 센서 카드(프로필 권장범위 평가). 한 번만 계산해 화면 밝기 판정에도 재사용.
+  const sensorCards = readings ? evaluateSensors(readings, profile.preferences) : [];
+  // 조도가 충분(또는 LED ON)하면 화면을 밝게. 데이터 로딩 전이나 조도 OK면 밝음이 기본.
+  const lightCard = sensorCards.find((s) => s.key === "light");
+  const screenLit = ledOn || !lightCard || lightCard.status === "good";
+
   return (
     <div>
-      {/* 조도 부족 시 화면이 어두컴컴해지는 오버레이 (LED 켜면 사라짐) */}
-      <div className={`${styles.dimOverlay} ${ledOn ? styles.lit : ""}`} aria-hidden="true" />
+      {/* 조도가 부족할 때만 화면을 어둡게 (충분하거나 LED 켜면 밝음) */}
+      <div className={`${styles.dimOverlay} ${screenLit ? styles.lit : ""}`} aria-hidden="true" />
 
       {/* 헤더 */}
       <header className={styles.header}>
@@ -180,7 +186,7 @@ export default function HomePage() {
       {/* 센서 요약 2x2 */}
       <h2 className={styles.sectionTitle}>센서 요약</h2>
       <section className={styles.sensorGrid}>
-        {(readings ? evaluateSensors(readings, profile.preferences) : []).map(({ key, ...rest }) => (
+        {sensorCards.map(({ key, ...rest }) => (
           <SensorCard key={key} {...rest} />
         ))}
       </section>
