@@ -64,14 +64,13 @@ export default function SettingsPage() {
     });
   }
 
-  // 값형 설정(예: 감정 공감 톤)을 탭하면 다음 옵션으로 순환하며 저장.
-  function cycleValue(group, key, options, current) {
-    const idx = options.indexOf(current);
-    const next = options[(idx + 1) % options.length];
-    setSettings((prev) => ({ ...prev, [group]: { ...prev[group], [key]: next } }));
-    updateSettings({ [group]: { [key]: next } }).catch((e) => {
+  // 값형 설정(예: 감정 공감 톤)을 리스트에서 고르면 저장.
+  function setValue(group, key, value) {
+    const prevValue = settings?.[group]?.[key];
+    setSettings((prev) => ({ ...prev, [group]: { ...prev[group], [key]: value } }));
+    updateSettings({ [group]: { [key]: value } }).catch((e) => {
       console.error("설정 저장 실패:", e);
-      setSettings((prev) => ({ ...prev, [group]: { ...prev[group], [key]: current } }));
+      setSettings((prev) => ({ ...prev, [group]: { ...prev[group], [key]: prevValue } }));
     });
   }
 
@@ -137,17 +136,21 @@ export default function SettingsPage() {
           if (s.type === "value") {
             const current = chat[s.key] ?? s.value;
             return (
-              <button
-                key={s.key}
-                className={styles.row}
-                onClick={() => cycleValue("chat", s.key, TONE_OPTIONS, current)}
-              >
+              <div key={s.key} className={styles.row}>
                 <span className={styles.rowLabel}>{s.label}</span>
-                <span className={styles.rowValue}>
-                  {current}
-                  <ChevronRight size={18} />
-                </span>
-              </button>
+                <select
+                  className={styles.select}
+                  value={current}
+                  onChange={(e) => setValue("chat", s.key, e.target.value)}
+                  aria-label={s.label}
+                >
+                  {TONE_OPTIONS.map((opt) => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
+              </div>
             );
           }
           return (

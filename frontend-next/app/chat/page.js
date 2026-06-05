@@ -62,8 +62,13 @@ export default function ChatPage() {
     };
   }, []);
 
+  // 채팅 진입/새 메시지 시 항상 최근(맨 아래)으로.
+  // .chatScroll 은 overflow 컨테이너가 아니라 문서 전체가 스크롤되므로 window 기준으로 내린다.
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    const id = requestAnimationFrame(() =>
+      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" })
+    );
+    return () => cancelAnimationFrame(id);
   }, [messages]);
 
   async function send(text) {
