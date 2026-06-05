@@ -7,7 +7,8 @@ import SensorCard from "@/components/SensorCard";
 import Pill from "@/components/Pill";
 import { BellIcon } from "@/components/Icons";
 import { plant } from "@/lib/data/plant";
-import { getSensors, getSuggestions, waterPlant, setLed, dismissSuggestion } from "@/lib/api";
+import { getSensorReadings, getSuggestions, waterPlant, setLed, dismissSuggestion } from "@/lib/api";
+import { evaluateSensors } from "@/lib/data/sensors";
 import { useProfile } from "@/lib/hooks/useProfile";
 import styles from "./home.module.css";
 // 제안·센서는 백엔드에서 가져온다. 센서는 라즈베리파이가 POST 한 최신값을 주기적으로 폴링한다.
@@ -25,7 +26,7 @@ const TOUCH_LINES = [
 export default function HomePage() {
   const { profile } = useProfile();
   const [suggestions, setSuggestions] = useState([]);
-  const [sensors, setSensors] = useState([]);
+  const [readings, setReadings] = useState(null); // 백엔드 원시 센서값
   const [mood, setMood] = useState(plant.mood);
   const [touchMsg, setTouchMsg] = useState(null);
   const [wiggle, setWiggle] = useState(false);
@@ -44,12 +45,13 @@ export default function HomePage() {
     };
   }, []);
 
-  // 센서값을 주기적으로 폴링 → 라즈베리파이가 보낸 최신값이 홈에 반영된다.
+  // 센서 원시값을 주기적으로 폴링 → 라즈베리파이가 보낸 최신값이 홈에 반영된다.
+  // 상태/권장범위 판정은 식물 프로필의 선호(profile.preferences)로 화면에서 계산한다.
   useEffect(() => {
     let alive = true;
     const load = () =>
-      getSensors()
-        .then((list) => alive && setSensors(list))
+      getSensorReadings()
+        .then((r) => alive && setReadings(r))
         .catch((e) => console.error("센서 불러오기 실패:", e));
     load();
     const timer = setInterval(load, SENSOR_POLL_MS);
@@ -178,7 +180,7 @@ export default function HomePage() {
       {/* 센서 요약 2x2 */}
       <h2 className={styles.sectionTitle}>센서 요약</h2>
       <section className={styles.sensorGrid}>
-        {sensors.map(({ key, ...rest }) => (
+        {(readings ? evaluateSensors(readings, profile.preferences) : []).map(({ key, ...rest }) => (
           <SensorCard key={key} {...rest} />
         ))}
       </section>
