@@ -12,6 +12,9 @@ frontend/dist/
 frontend/.vite/
 frontend/npm-debug.log*
 
+# 로컬 개발 도구 (표정 웹 미리보기)
+raspberry/preview_server.py
+
 # OS / IDE
 .DS_Store
 .idea/

@@ -17,7 +17,9 @@ pygame 전체화면 창으로 띄운다. 반드시 라즈베리파이 '데스크
 """
 
 import os
+import re
 import math
+import subprocess
 import pygame
 
 # ── 디스플레이 설정 ─────────────────────────────────────────────
@@ -26,6 +28,10 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 WIDTH, HEIGHT = 480, 320     # LCD 해상도 (가로 모드)
 FULLSCREEN = True            # 창으로 먼저 확인하려면 False
 SHOW_INFO  = False           # 하단에 센서값 텍스트도 표시할지 (이미지처럼 깔끔하게 하려면 False)
+
+# SPI LCD가 HDMI와 별개의 DRM 장치로 물려 가상 데스크톱 오른쪽(예: +1920+0)에
+# 붙는 환경에서는, 전체화면이 아니라 LCD 위치에 테두리 없는 창을 올려야 한다.
+# LCD_POS="x,y" 로 직접 지정하거나, 비우면 xrandr 로 480×320 출력 위치를 자동 감지.
 
 # ── 색상 팔레트 ─────────────────────────────────────────────────
 BLACK   = (0, 0, 0)
@@ -37,23 +43,30 @@ WHITE   = (235, 238, 245)
 WATER   = (120, 200, 255)
 TONGUE  = (255, 110, 120)
 TEXT    = (200, 205, 215)
+ICE     = (150, 220, 255)    # cold (저온) — 차가운 하늘색
+HOT     = (255, 95, 60)      # hot  (고온) — 뜨거운 빨강·주황
+SWEAT   = (120, 200, 255)    # 땀방울
 
 MOOD_COLOR = {
     "happy":   YELLOW,
     "sad":     BLUE,
     "thirsty": ORANGE,
     "angry":   RED,
+    "cold":    ICE,
+    "hot":     HOT,
 }
 VALID_MOODS = tuple(MOOD_COLOR.keys())
 
-# ── 임계값 ──────────────────────────────────────────────────────
-THRESHOLDS = {
-    "soil_low":    25,    # 이하 → 건조 (thirsty)
-    "humid_low":   35,    # 이하 → 습도 부족 (thirsty)
-    "temp_high":   30,    # 초과 → 과열 (angry)
-    "light_high":  800,   # 초과 → 강한 빛 (angry)
-    "light_low":   200,   # 이하 → 너무 어두움 (sad)
+# ── 적정 범위 기본값 (백엔드 DEFAULT_PROFILE.preferences 와 동일) ──
+# 표정 판단은 하드코딩이 아니라 이 prefs(서버에서 받아온 식물 프로필)로 한다.
+# 서버 미연동 시 fallback 으로만 이 기본값을 쓴다.
+DEFAULT_PREFS = {
+    "tempMin": 18, "tempMax": 28,
+    "humidityMin": 60, "humidityMax": 80,
+    "soilMoistureMin": 40, "soilMoistureMax": 70,
+    "lightLevel": "보통",
 }
+LIGHT_MIN_LUX = {"낮음": 150, "보통": 400, "높음": 900}
 
 # ── pygame 상태 ──────────────────────────────────────────────────
 _screen = None
@@ -77,20 +90,54 @@ def _pick_lcd_display():
     return 0
 
 
+def _detect_lcd_pos():
+    """LCD(480×320) 출력이 가상 데스크톱에서 차지하는 좌상단 위치(x, y)를 찾는다.
+    1) 환경변수 LCD_POS="x,y" 가 있으면 그것을 사용.
+    2) 없으면 xrandr 출력에서 480x320+X+Y 패턴을 찾아 위치 반환.
+    3) 둘 다 실패하면 None (→ 위치 지정 없이 전체화면 fallback)."""
+    env = os.environ.get("LCD_POS")
+    if env:
+        m = re.match(r"\s*(\d+)\s*,\s*(\d+)\s*$", env)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    try:
+        out = subprocess.check_output(["xrandr"], text=True,
+                                      stderr=subprocess.DEVNULL)
+        # 예: "SPI-1 connected 480x320+1920+0 (normal ..."
+        for m in re.finditer(r"connected (?:primary )?(\d+)x(\d+)\+(\d+)\+(\d+)", out):
+            w, h, x, y = (int(g) for g in m.groups())
+            if (w, h) == (WIDTH, HEIGHT):
+                return x, y
+    except Exception:
+        pass
+    return None
+
+
 def _init():
     global _screen, _font_large, _font_small
     if _screen is not None:
         return
+
+    pos = _detect_lcd_pos()
+    if pos is not None:
+        # LCD 위치에 테두리 없는 창을 정확히 올린다 (HDMI와 별개 DRM 장치 대응).
+        os.environ["SDL_VIDEO_WINDOW_POS"] = f"{pos[0]},{pos[1]}"
+
     pygame.init()
-    idx = _pick_lcd_display()
-    flags = pygame.FULLSCREEN if FULLSCREEN else 0
-    try:
-        # pygame 2.0+ : display 인자로 특정 모니터(LCD)에 전체화면
-        _screen = pygame.display.set_mode((WIDTH, HEIGHT), flags, display=idx)
-    except TypeError:
-        _screen = pygame.display.set_mode((WIDTH, HEIGHT), flags)
-    print(f"[face] display index = {idx} (전체 디스플레이: "
-          f"{pygame.display.get_num_displays() if hasattr(pygame.display, 'get_num_displays') else '?'})")
+
+    if pos is not None:
+        _screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.NOFRAME)
+        print(f"[face] LCD 위치 {pos} 에 테두리 없는 창으로 표시")
+    else:
+        idx = _pick_lcd_display()
+        flags = pygame.FULLSCREEN if FULLSCREEN else 0
+        try:
+            # pygame 2.0+ : display 인자로 특정 모니터(LCD)에 전체화면
+            _screen = pygame.display.set_mode((WIDTH, HEIGHT), flags, display=idx)
+        except TypeError:
+            _screen = pygame.display.set_mode((WIDTH, HEIGHT), flags)
+        print(f"[face] display index = {idx} (전체 디스플레이: "
+              f"{pygame.display.get_num_displays() if hasattr(pygame.display, 'get_num_displays') else '?'})")
     pygame.display.set_caption("GrowMate")
     pygame.mouse.set_visible(False)
     font_candidates = [
@@ -103,20 +150,27 @@ def _init():
     _font_small = pygame.font.Font(chosen, 18)
 
 
-# ── 조건 판단 (LLM mood 없을 때 센서 기반 fallback) ───────────────
-def _determine_mood(data: dict) -> str:
-    soil  = data.get("soil",  50)
-    temp  = data.get("temp",  25)
-    humid = data.get("humid", 55)
-    light = data.get("light", 500)
-    t = THRESHOLDS
+# ── 조건 판단 (서버 미연동 시 센서 기반 로컬 fallback) ────────────
+# 백엔드 determine_display_mood() 와 동일한 우선순위. 기준은 prefs(식물 프로필).
+def _determine_mood(data: dict, prefs: dict = None) -> str:
+    p = prefs or DEFAULT_PREFS
+    soil  = data.get("soil")
+    temp  = data.get("temp")
+    humid = data.get("humid")
+    light = data.get("light")
+    min_lux = LIGHT_MIN_LUX.get(p.get("lightLevel", "보통"), 400)
 
-    if soil <= t["soil_low"] or humid <= t["humid_low"]:
-        return "thirsty"
-    if temp > t["temp_high"] or light > t["light_high"]:
-        return "angry"
-    if light <= t["light_low"]:
-        return "sad"
+    if soil is not None and soil < p["soilMoistureMin"]:
+        return "thirsty"                       # 토양 건조
+    if temp is not None and temp > p["tempMax"]:
+        return "hot"                           # 고온
+    if temp is not None and temp < p["tempMin"]:
+        return "cold"                          # 저온
+    if light is not None and light < min_lux:
+        return "sad"                           # 조도 부족
+    if (soil is not None and soil > p["soilMoistureMax"]) or \
+       (humid is not None and not (p["humidityMin"] <= humid <= p["humidityMax"])):
+        return "angry"                         # 과습 · 습도 이상
     return "happy"
 
 
@@ -153,18 +207,22 @@ def _teardrop(surf, color, x, y, w, h):
 
 
 def _water_glass(surf, x, y, w, h):
-    """오른쪽에 놓이는 물컵 아이콘 (위가 넓은 사다리꼴 + 물)."""
+    """미니멀 물컵 (위 넓은 사다리꼴 외곽선 + 물 + 수면선)."""
     top_l = (x, y)
     top_r = (x + w, y)
     bot_l = (x + w * 0.16, y + h)
     bot_r = (x + w * 0.84, y + h)
-    wl = y + h * 0.34   # 수면 높이
+
+    # 수면 높이 및 그 지점의 좌우 폭(사다리꼴 보간)
+    wl = y + h * 0.40
+    f = (wl - y) / h
+    wl_l = (x + w * (0.16 * f), wl)
+    wl_r = (x + w * (1.0 - 0.16 * f), wl)
+
     # 물 채움
-    wl_l = (x + w * 0.07, wl)
-    wl_r = (x + w * 0.93, wl)
     pygame.draw.polygon(surf, WATER, [wl_l, wl_r, bot_r, bot_l])
-    # 컵 외곽선
-    pygame.draw.lines(surf, WHITE, False, [top_l, bot_l, bot_r, top_r], 4)
+    # 컵 외곽선 (사다리꼴)
+    pygame.draw.lines(surf, WHITE, True, [top_l, top_r, bot_r, bot_l], 4)
     # 수면선
     pygame.draw.line(surf, WHITE, wl_l, wl_r, 3)
 
@@ -177,76 +235,139 @@ def _draw_face(surf, mood: str):
     eye_dx = 44
     lx, rx_ = cx - eye_dx, cx + eye_dx   # 좌/우 눈 중심 x
 
-    # ── happy: 노랑 가득 찬 얼굴 + 활짝 웃음 ──────────────────────
+    # ── happy: 검은 배경 + 노란 눈·입만으로 표현 ──────────────────
     if mood == "happy":
-        pygame.draw.circle(surf, YELLOW, (cx, cy), r)
-        # 감은 웃는 눈 (⌢ 위로 볼록)
+        # 감은 웃는 눈 (⌢ 위로 볼록) — 노란색, 더 깊게 구부림
         for ex in (lx, rx_):
-            _arc_curve(surf, BLACK, (ex, eye_y + 6), 22, 16,
+            _arc_curve(surf, YELLOW, (ex, eye_y + 18), 22, 24,
                        math.radians(0), math.radians(180), 7)
-        # 볼터치
-        for ex in (lx, rx_):
-            cheek = pygame.Surface((40, 22), pygame.SRCALPHA)
-            pygame.draw.ellipse(cheek, (255, 140, 120, 150), cheek.get_rect())
-            surf.blit(cheek, (ex - 20, cy + 18))
-        # 활짝 벌린 웃는 입 (아래 반원) + 혀
+        # 활짝 벌린 웃는 입 = 노란 아래 반원 + 혀 (눈에 더 가깝게 위로)
         mw, mh = 96, 84
-        mrect = pygame.Rect(cx - mw // 2, cy + 6, mw, mh)
-        pygame.draw.ellipse(surf, BLACK, mrect)
-        pygame.draw.rect(surf, YELLOW, (cx - mw // 2, cy + 6, mw, mh // 2))  # 윗부분 가려 평평한 위쪽
-        pygame.draw.line(surf, BLACK, (cx - mw // 2 + 3, cy + 6 + mh // 2),
-                         (cx + mw // 2 - 3, cy + 6 + mh // 2), 6)            # 윗입술 선
+        my = cy - 6
+        mrect = pygame.Rect(cx - mw // 2, my, mw, mh)
+        pygame.draw.ellipse(surf, YELLOW, mrect)                            # 노란 입
+        pygame.draw.rect(surf, BLACK, (cx - mw // 2, my, mw, mh // 2))      # 윗부분 잘라 아래 반원만
         pygame.draw.ellipse(surf, TONGUE,
-                            (cx - 22, cy + 6 + mh - 30, 44, 26))            # 혀
+                            (cx - 22, my + mh - 30, 44, 26))                # 혀
 
-    # ── sad: 파란 외곽선 + 처진 눈 + 눈물 ────────────────────────
+    # ── sad: 검은 배경 + 파란 눈·입·눈물만으로 표현 ───────────────
     elif mood == "sad":
-        pygame.draw.circle(surf, BLUE, (cx, cy), r, 7)
-        # 처진 슬픈 눈: 위로 볼록한 눈꺼풀(⌢) + 아래 동공, 바깥쪽이 살짝 내려감
+        # 처진 슬픈 눈 (⌣ 아래로 볼록 = happy 눈의 반대)
         for ex in (lx, rx_):
-            _arc_curve(surf, BLUE, (ex, eye_y + 4), 19, 13,
-                       math.radians(10), math.radians(170), 6)
-            pygame.draw.circle(surf, BLUE, (ex, eye_y + 8), 5)   # 동공
-        # 눈물 (왼쪽 눈 아래)
-        _teardrop(surf, WATER, lx, eye_y + 22, 18, 30)
-        # 우는 입 (⌢ 프라운)
-        _arc_curve(surf, BLUE, (cx, cy + 66), 34, 24,
-                   math.radians(20), math.radians(160), 7)
+            _arc_curve(surf, BLUE, (ex, eye_y - 2), 24, 18,
+                       math.radians(180), math.radians(360), 7)
+        # 눈물 (오른쪽 눈 바깥 아래로 흐름)
+        _teardrop(surf, WATER, rx_ + 18, eye_y + 16, 16, 30)
+        # 우는 입 (아래로 처진 프라운 ⌒)
+        _arc_curve(surf, BLUE, (cx, cy + 56), 40, 26,
+                   math.radians(0), math.radians(180), 7)
 
-    # ── thirsty: 주황 외곽선 + 혀 + 물컵 ─────────────────────────
+    # ── thirsty: 검은 배경 + 반쯤 감은 주황 눈 + 헥헥 혀 + 물컵 ────
     elif mood == "thirsty":
-        pygame.draw.circle(surf, ORANGE, (cx, cy), r, 7)
-        # 편안히 감은 눈 (⌣ 아래로 볼록 = 흐뭇)
+        # 반쯤 감은 졸린 눈: 주황 원 + 가로 눈꺼풀선 + 아래 반달 채움
+        er = 28
         for ex in (lx, rx_):
-            _arc_curve(surf, ORANGE, (ex, eye_y - 2), 20, 14,
-                       math.radians(200), math.radians(340), 7)
-        # 입 (벌린 윗선) + 아래로 늘어진 혀
-        pygame.draw.arc(surf, ORANGE,
-                        pygame.Rect(cx - 34, cy + 22, 68, 44),
-                        math.radians(200), math.radians(340), 7)
-        pygame.draw.ellipse(surf, TONGUE, (cx - 14, cy + 48, 28, 40))  # 늘어진 혀
-        pygame.draw.line(surf, (210, 70, 90), (cx, cy + 54), (cx, cy + 82), 3)
-        # 오른쪽 물컵
-        _water_glass(surf, 372, 116, 74, 96)
+            pygame.draw.circle(surf, ORANGE, (ex, eye_y), er, 4)          # 원 외곽
+            pygame.draw.line(surf, ORANGE, (ex - er + 1, eye_y - 1),
+                             (ex + er - 1, eye_y - 1), 4)                 # 가로 눈꺼풀
+            pygame.draw.arc(surf, ORANGE,
+                            pygame.Rect(ex - er + 4, eye_y - er + 4,
+                                        2 * (er - 4), 2 * (er - 4)),
+                            math.radians(200), math.radians(340), 8)     # 아래 눈동자
+        # 헥헥거리는 입(가로선) + 오른쪽 아래 아치형 빨간 혀
+        mx, my = cx - 4, cy + 34
+        # 오른쪽 아래로 볼록한 혀 (타원 아래 반쪽)
+        tw, th = 32, 26
+        tl = mx + 2
+        tcx = tl + tw // 2
+        pygame.draw.ellipse(surf, TONGUE, (tl, my - th, tw, th * 2))     # 혀 타원
+        pygame.draw.rect(surf, BLACK, (tl, my - th, tw, th))            # 윗부분 잘라 아래 아치만
+        pygame.draw.line(surf, BLACK, (tcx, my), (tcx, my + 16), 3)      # 혀 중앙 줄(입에 닿게)
+        pygame.draw.line(surf, ORANGE, (mx - 38, my), (mx + 42, my), 5)  # 입(가로선, 혀 덮게 넓게)
+        # 오른쪽 물컵 (작게, 입 쪽에 가깝게)
+        _water_glass(surf, 300, 170, 40, 58)
 
-    # ── angry: 빨강 외곽선 + '><' 눈 + 분노 마크 ─────────────────
+    # ── angry: 검은 배경 + 화난 눈썹 + '><' 눈 + 벌린 사각 입 ──────
     elif mood == "angry":
-        pygame.draw.circle(surf, RED, (cx, cy), r, 7)
-        # 왼쪽 눈 '>' : 오른쪽이 꼭짓점, 팔이 왼쪽으로
-        _thick_line(surf, RED, (lx + 20, eye_y), (lx - 18, eye_y - 18), 8)
-        _thick_line(surf, RED, (lx + 20, eye_y), (lx - 18, eye_y + 18), 8)
-        # 오른쪽 눈 '<' : 왼쪽이 꼭짓점, 팔이 오른쪽으로
-        _thick_line(surf, RED, (rx_ - 20, eye_y), (rx_ + 18, eye_y - 18), 8)
-        _thick_line(surf, RED, (rx_ - 20, eye_y), (rx_ + 18, eye_y + 18), 8)
-        # 이 악문 입 (작은 프라운)
-        _arc_curve(surf, RED, (cx, cy + 64), 26, 16,
-                   math.radians(20), math.radians(160), 7)
-        # 분노 마크 (💢) 오른쪽 위
-        mvx, mvy = cx + 78, cy - 70
-        pygame.draw.line(surf, RED, (mvx - 12, mvy), (mvx + 12, mvy), 5)
-        pygame.draw.line(surf, RED, (mvx, mvy - 12), (mvx, mvy + 12), 5)
-        pygame.draw.line(surf, RED, (mvx - 9, mvy - 9), (mvx + 9, mvy + 9), 5)
-        pygame.draw.line(surf, RED, (mvx - 9, mvy + 9), (mvx + 9, mvy - 9), 5)
+        # 가운데로 모인 화난 눈썹 (\  / 모양)
+        _thick_line(surf, RED, (lx - 26, eye_y - 26), (cx - 14, eye_y - 8), 8)
+        _thick_line(surf, RED, (rx_ + 26, eye_y - 26), (cx + 14, eye_y - 8), 8)
+        # 찡그린 '><' 눈
+        _thick_line(surf, RED, (lx + 16, eye_y + 8), (lx - 18, eye_y - 6), 8)   # '>' 위팔
+        _thick_line(surf, RED, (lx + 16, eye_y + 8), (lx - 18, eye_y + 22), 8)  # '>' 아래팔
+        _thick_line(surf, RED, (rx_ - 16, eye_y + 8), (rx_ + 18, eye_y - 6), 8)  # '<' 위팔
+        _thick_line(surf, RED, (rx_ - 16, eye_y + 8), (rx_ + 18, eye_y + 22), 8)  # '<' 아래팔
+        # 벌린 사각 입 (라운드 사각형 외곽선)
+        mrect = pygame.Rect(cx - 52, cy + 24, 104, 46)
+        pygame.draw.rect(surf, RED, mrect, 8, border_radius=12)
+
+    # ── cold: 검은 배경 + 하늘색 '><' 눈 + 이 악문 입 + 땀 + 눈송이 + 고드름 ──
+    elif mood == "cold":
+        # 꽉 감은 '><' 눈 (안쪽으로 모인 꼭짓점)
+        _thick_line(surf, ICE, (lx + 14, eye_y), (lx - 18, eye_y - 16), 8)   # '>' 위팔
+        _thick_line(surf, ICE, (lx + 14, eye_y), (lx - 18, eye_y + 16), 8)   # '>' 아래팔
+        _thick_line(surf, ICE, (rx_ - 14, eye_y), (rx_ + 18, eye_y - 16), 8)  # '<' 위팔
+        _thick_line(surf, ICE, (rx_ - 14, eye_y), (rx_ + 18, eye_y + 16), 8)  # '<' 아래팔
+        # 이 악문 입 (사각 + 이빨 격자) — 눈에 더 가깝게 위로
+        mw2, mh2 = 92, 34
+        ml, mt = cx - mw2 // 2, cy + 14
+        pygame.draw.rect(surf, ICE, (ml, mt, mw2, mh2), 5, border_radius=6)
+        pygame.draw.line(surf, ICE, (ml, mt + mh2 // 2), (ml + mw2, mt + mh2 // 2), 4)  # 윗니/아랫니 경계
+        for i in range(1, 6):
+            vx = ml + i * mw2 // 6
+            pygame.draw.line(surf, ICE, (vx, mt + 2), (vx, mt + mh2 - 2), 3)            # 이 경계(세로)
+        # 입에 붙은 고드름 (이빨 바로 아래) — 입 폭 안쪽, 간격·길이 불규칙
+        top = mt + mh2 - 2
+        for dx, ln, hw in ((-38, 15, 6), (-26, 26, 5), (-15, 18, 5), (-3, 30, 6),
+                           (10, 21, 5), (23, 28, 5), (36, 14, 4)):
+            ix = cx + dx
+            pygame.draw.polygon(surf, ICE, [(ix - hw, top), (ix + hw, top), (ix, top + ln)])
+        # 날리는 땀방울 (얼굴 밖)
+        for sx, sy, w, h in ((cx + 80, cy - 54, 14, 22), (cx + 102, cy - 6, 13, 21),
+                             (cx + 92, cy + 42, 12, 19), (cx - 98, cy - 26, 12, 19)):
+            _teardrop(surf, ICE, sx, sy, w, h)
+        # 눈송이 (머리 위)
+        for sx, sy, s in ((cx - 80, cy - 66, 14), (cx - 34, cy - 92, 11), (cx + 62, cy - 84, 12)):
+            for ang in (0, 60, 120):
+                a = math.radians(ang)
+                dx, dy = int(s * math.cos(a)), int(s * math.sin(a))
+                pygame.draw.line(surf, ICE, (sx - dx, sy - dy), (sx + dx, sy + dy), 3)
+
+    # ── hot: 검은 배경 + 주황, 열기 물결 + 축 처진 눈 + 괴로운 입 ──
+    elif mood == "hot":
+        ey = cy - 8    # 눈 기준 높이 (열기 물결을 위에 둘 공간 확보)
+        # 위로 피어오르는 열기 물결 3개
+        for bx in (cx - 42, cx, cx + 42):
+            pts = []
+            for i in range(33):
+                t = i / 32
+                yy = (cy - 80) - t * 48
+                xx = bx + 9 * math.sin(t * 2.2 * math.pi)
+                pts.append((xx, yy))
+            pygame.draw.lines(surf, HOT, False, pts, 5)
+        # 걱정스런 눈썹 (아래로 볼록 ⌣ + 바깥쪽으로 처진 사선)
+        for ex, outer in ((lx, -1), (rx_, +1)):
+            pts = []
+            for i in range(21):
+                t = i / 20
+                ang = math.radians(200 + t * 140)          # ⌣ (아래로 볼록)
+                bx_ = ex + 21 * math.cos(ang)
+                by_ = (ey - 22) - 8 * math.sin(ang)
+                by_ += outer * (bx_ - ex) * 0.4            # 바깥쪽으로 갈수록 처짐
+                pts.append((bx_, by_))
+            pygame.draw.lines(surf, HOT, False, pts, 5)
+            for p in (pts[0], pts[-1]):
+                pygame.draw.circle(surf, HOT, (int(p[0]), int(p[1])), 2)
+        # 지친 감은 눈 (아래로 볼록 ⌣) — 넓게 아래
+        for ex in (lx, rx_):
+            _arc_curve(surf, HOT, (ex, ey + 12), 26, 12,
+                       math.radians(195), math.radians(345), 6)
+        # 괴로운 입 — 강낭콩 모양 (가로로 넓고 아래 가운데가 오목)
+        mw3, mh3 = 96, 48
+        mtop = cy + 32
+        pygame.draw.ellipse(surf, HOT, (cx - mw3 // 2, mtop, mw3, mh3))   # 채운 몸통
+        # 아래 가운데 완만한 오목 — 넓고 얕게 깎아 부드러운 곡선
+        pygame.draw.ellipse(surf, BLACK, (cx - 42, mtop + mh3 - 10, 84, 26))
 
 
 # ── 센서값 텍스트 (옵션) ─────────────────────────────────────────
@@ -272,10 +393,11 @@ def _draw_info(surf, data: dict, mood: str):
 
 
 # ── 공개 API ─────────────────────────────────────────────────────
-def update_face(data: dict, mood: str = None):
+def update_face(data: dict, mood: str = None, prefs: dict = None):
     """
     센서 dict 를 받아 화면을 갱신한다.
-    mood 를 직접 넘기면 LLM 감정 우선, 없으면 센서값으로 판단.
+    mood 를 직접 넘기면 그 표정을 우선(서버가 계산한 센서 표정),
+    없으면 prefs(식물 프로필) 기준으로 로컬 판단.
     """
     global _current_mood
     _init()
@@ -285,7 +407,7 @@ def update_face(data: dict, mood: str = None):
             pygame.quit()
             return
 
-    resolved = mood if mood in VALID_MOODS else _determine_mood(data)
+    resolved = mood if mood in VALID_MOODS else _determine_mood(data, prefs)
     _current_mood = resolved
 
     _draw_face(_screen, resolved)
