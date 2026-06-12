@@ -30,11 +30,11 @@ from sqlalchemy.orm import Session
 try:
     from database import Base, engine, get_db, SessionLocal
     import models  # noqa: F401 — Base.metadata 에 테이블 등록을 위해 import 필요
-    from models import ChatMessage, SensorReading, Setting, Suggestion, seed_defaults
+    from models import ChatMessage, SensorReading, Setting, Suggestion, seed_defaults, DEFAULT_PROFILE
 except ModuleNotFoundError:
     from backend.database import Base, engine, get_db, SessionLocal
     from backend import models  # noqa: F401
-    from backend.models import ChatMessage, SensorReading, Setting, Suggestion, seed_defaults
+    from backend.models import ChatMessage, SensorReading, Setting, Suggestion, seed_defaults, DEFAULT_PROFILE
 
 load_dotenv()
 
@@ -311,9 +311,9 @@ def get_mood():
 # ── 설정 (DB 영속화) ────────────────────────────────────────────
 @app.get("/api/settings")
 def get_settings(db: Session = Depends(get_db)):
-    """전체 설정 조회 → {notify:{...}, care:{...}, chat:{...}}"""
+    """전체 설정 조회 → {notify:{...}, care:{...}, chat:{...}} (profile 제외)"""
     rows = db.query(Setting).all()
-    return {r.key: json.loads(r.value) for r in rows}
+    return {r.key: json.loads(r.value) for r in rows if r.key != "profile"}
 
 
 @app.patch("/api/settings")
@@ -333,6 +333,32 @@ def patch_settings(patch: dict = Body(...), db: Session = Depends(get_db)):
             db.add(Setting(key=group, value=new_value))
     db.commit()
     return get_settings(db)
+
+
+# ── 식물 프로필 (DB 영속화) ─────────────────────────────────────
+def _load_profile(db: Session) -> dict:
+    """저장된 프로필 반환 (없으면 기본값)."""
+    row = db.get(Setting, "profile")
+    return json.loads(row.value) if row else DEFAULT_PROFILE
+
+
+@app.get("/api/profile")
+def get_profile(db: Session = Depends(get_db)):
+    """식물 프로필(이름·종·적정 환경 범위) 조회. 적정 판단의 단일 기준."""
+    return _load_profile(db)
+
+
+@app.put("/api/profile")
+def put_profile(profile: dict = Body(...), db: Session = Depends(get_db)):
+    """프로필 전체 저장(덮어쓰기). 적정 범위(preferences)가 센서 상태/표정 판단에 쓰인다."""
+    row = db.get(Setting, "profile")
+    new_value = json.dumps(profile, ensure_ascii=False)
+    if row:
+        row.value = new_value
+    else:
+        db.add(Setting(key="profile", value=new_value))
+    db.commit()
+    return _load_profile(db)
 
 
 # ── 홈 제안 (DB 영속화) ─────────────────────────────────────────
@@ -400,17 +426,50 @@ def action_led(body: LedBody, db: Session = Depends(get_db)):
 SENSOR_KEYS = ["soil", "temp", "humid", "light"]
 
 
-def sensor_status(key: str, value: float) -> str:
-    """원시값 → 상태 판정(good|warn). 임계값은 백엔드가 소유 (docs/api.md §0.2)."""
+# 조도 선호별 최소 lux (프론트 lib/data/sensors.js 와 동일)
+LIGHT_MIN_LUX = {"낮음": 150, "보통": 400, "높음": 900}
+
+
+def _min_lux(prefs: dict) -> float:
+    return LIGHT_MIN_LUX.get(prefs.get("lightLevel", "보통"), 400)
+
+
+def sensor_status(key: str, value: float, prefs: dict) -> str:
+    """원시값 → 상태 판정(good|warn). 임계값은 '하드코딩'이 아니라 식물 프로필(prefs)에서 온다.
+    프론트 evaluateSensors(lib/data/sensors.js)와 동일한 범위 판정."""
+    p = prefs
     if key == "soil":      # 토양 수분 %
-        return "good" if value >= 30 else "warn"
+        return "good" if p["soilMoistureMin"] <= value <= p["soilMoistureMax"] else "warn"
     if key == "temp":      # 온도 °C
-        return "good" if 15 <= value <= 28 else "warn"
+        return "good" if p["tempMin"] <= value <= p["tempMax"] else "warn"
     if key == "humid":     # 습도 %
-        return "good" if 40 <= value <= 75 else "warn"
+        return "good" if p["humidityMin"] <= value <= p["humidityMax"] else "warn"
     if key == "light":     # 조도 lux
-        return "good" if value >= 500 else "warn"
+        return "good" if value >= _min_lux(p) else "warn"
     return "good"
+
+
+def determine_display_mood(readings: dict, prefs: dict) -> str:
+    """센서값 + 프로필 적정 범위 → LCD 표정(mood). 모든 기준은 prefs 에서 온다.
+    우선순위: 토양건조 > 고온 > 저온 > 조도부족 > 과습/습도이상 > 적정(happy)."""
+    p = prefs
+    soil  = readings.get("soil")
+    temp  = readings.get("temp")
+    humid = readings.get("humid")
+    light = readings.get("light")
+
+    if soil is not None and soil < p["soilMoistureMin"]:
+        return "thirsty"                       # 토양 건조
+    if temp is not None and temp > p["tempMax"]:
+        return "hot"                           # 고온
+    if temp is not None and temp < p["tempMin"]:
+        return "cold"                          # 저온
+    if light is not None and light < _min_lux(p):
+        return "sad"                           # 조도 부족 (어두움)
+    if (soil is not None and soil > p["soilMoistureMax"]) or \
+       (humid is not None and not (p["humidityMin"] <= humid <= p["humidityMax"])):
+        return "angry"                         # 과습 · 습도 이상
+    return "happy"                             # 모든 조건 적정
 
 
 class SensorIngest(BaseModel):
@@ -444,6 +503,7 @@ def ingest_sensors(body: SensorIngest, db: Session = Depends(get_db)):
 @app.get("/api/sensors")
 def get_sensors(db: Session = Depends(get_db)):
     """앱(홈 화면)이 호출 → 현재 센서값 + 상태. 프론트가 한글 라벨/단위로 가공한다."""
+    prefs = _load_profile(db)["preferences"]
     rows = {r.key: r for r in db.query(SensorReading).all()}
     sensors = []
     for key in SENSOR_KEYS:
@@ -455,7 +515,16 @@ def get_sensors(db: Session = Depends(get_db)):
         sensors.append({
             "key": key,
             "value": value,
-            "status": sensor_status(key, r.value),
+            "status": sensor_status(key, r.value, prefs),
             "updatedAt": (r.updated_at.isoformat() + "Z" if r.updated_at else None),
         })
     return {"sensors": sensors}
+
+
+@app.get("/api/display-mood")
+def get_display_mood(db: Session = Depends(get_db)):
+    """라즈베리파이가 폴링 → 현재 '센서 환경 상태' 기반 LCD 표정.
+    프로필 적정 범위로 판단 (챗봇 LLM 감정과 무관)."""
+    prefs = _load_profile(db)["preferences"]
+    readings = {r.key: r.value for r in db.query(SensorReading).all()}
+    return {"mood": determine_display_mood(readings, prefs)}

@@ -23,13 +23,15 @@ if FACE_ENABLED:
         FACE_ENABLED = False
 
 # ── 설정 ────────────────────────────────────────────────────────
-BASE_URL     = "http://172.20.10.3:8000"
-SERVER_URL   = f"{BASE_URL}/api/sensors"
-MOOD_URL     = f"{BASE_URL}/api/mood"
-INTERVAL_SEC = 5       # 몇 초마다 보낼지
-TEST_MODE    = True    # True: 가짜 값. 실제 센서 연결 후 False.
+BASE_URL      = "http://172.20.10.3:8000"
+SERVER_URL    = f"{BASE_URL}/api/sensors"
+MOOD_URL      = f"{BASE_URL}/api/display-mood"   # 센서 환경 상태 기반 표정 (LLM 감정 아님)
+PROFILE_URL   = f"{BASE_URL}/api/profile"        # 적정 범위(prefs) — 오프라인 로컬 판단용 캐시
+INTERVAL_SEC  = 5       # 몇 초마다 보낼지
+TEST_MODE     = True    # True: 가짜 값. 실제 센서 연결 후 False.
 
-_last_mood = None   # 마지막으로 받은 LLM mood (서버 연결 실패 시 유지)
+_last_mood  = None   # 마지막으로 받은 표정 (서버 연결 실패 시 유지)
+_prefs      = None   # 서버에서 받아 캐시한 식물 프로필 적정 범위
 
 
 def read_sensors():
@@ -61,8 +63,8 @@ def read_sensors():
     raise NotImplementedError("실제 센서 코드를 채운 뒤 TEST_MODE = False 로 바꾸세요.")
 
 
-def fetch_llm_mood() -> str | None:
-    """백엔드에서 현재 LLM mood 를 가져온다. 실패 시 None 반환."""
+def fetch_display_mood() -> str | None:
+    """백엔드에서 '센서 환경 상태 기반 표정'을 가져온다. 실패 시 None."""
     try:
         r = requests.get(MOOD_URL, timeout=3)
         if r.status_code == 200:
@@ -72,8 +74,20 @@ def fetch_llm_mood() -> str | None:
     return None
 
 
+def fetch_prefs() -> dict | None:
+    """백엔드에서 식물 프로필의 적정 범위(preferences)를 가져온다. 실패 시 None.
+    오프라인일 때 로컬 표정 판단에 쓰려고 캐시한다."""
+    try:
+        r = requests.get(PROFILE_URL, timeout=3)
+        if r.status_code == 200:
+            return r.json().get("preferences")
+    except Exception:
+        pass
+    return None
+
+
 def main():
-    global _last_mood
+    global _last_mood, _prefs
     print(f"[GrowMate] 시작 → {SERVER_URL} "
           f"(간격 {INTERVAL_SEC}s | TEST_MODE={TEST_MODE} | FACE={FACE_ENABLED})")
     try:
@@ -81,26 +95,33 @@ def main():
             try:
                 data = read_sensors()
 
-                # 1) LLM mood 폴링 (성공 시 갱신, 실패 시 이전 값 유지)
-                fetched = fetch_llm_mood()
+                # 0) 적정 범위(prefs) 캐시 — 오프라인 로컬 판단용 (성공 시 갱신)
+                fetched_prefs = fetch_prefs()
+                if fetched_prefs:
+                    _prefs = fetched_prefs
+
+                # 1) 서버 전송 (최신 센서값 저장 → 서버가 이 값으로 표정 계산)
+                r = requests.post(SERVER_URL, json=data, timeout=5)
+
+                # 2) 센서 환경 상태 기반 표정 폴링 (성공 시 갱신, 실패 시 이전 값 유지)
+                fetched = fetch_display_mood()
                 if fetched:
                     _last_mood = fetched
 
-                # 2) 표정 업데이트 — LLM mood 우선, 없으면 센서 기반
+                # 3) 표정 업데이트 — 서버 표정 우선, 없으면 prefs 기반 로컬 판단
                 if FACE_ENABLED:
-                    update_face(data, mood=_last_mood)
+                    update_face(data, mood=_last_mood, prefs=_prefs)
 
-                # 3) 서버 전송
-                r = requests.post(SERVER_URL, json=data, timeout=5)
                 print("보냄", data, "| mood:", _last_mood, "->", r.status_code)
 
             except requests.exceptions.ConnectionError:
-                print("[경고] 서버 연결 실패 — 센서 기반 표정으로 fallback.")
+                print("[경고] 서버 연결 실패 — 캐시된 프로필로 로컬 표정 판단.")
                 if FACE_ENABLED:
                     update_face(
                         data if 'data' in dir() else
                         {"soil": 50, "temp": 25, "humid": 55, "light": 500},
-                        mood=None,  # 서버 없으면 센서 기반
+                        mood=None,        # 서버 없으면 로컬 판단
+                        prefs=_prefs,     # 캐시된 적정 범위 사용 (없으면 face.py 기본값)
                     )
             except Exception as e:
                 print("오류:", e)

@@ -24,3 +24,17 @@ export function getPlantProfile() {
   }
   return apiFetch("/plant/profile");
 }
+
+// GET /profile — 식물 프로필(이름·종·적정 환경 범위 preferences).
+// 적정 범위는 센서 상태/LCD 표정 판단의 단일 기준이 된다.
+// mock 모드(백엔드 미연동)에서는 null 을 반환해 훅이 localStorage 로 동작하게 한다.
+export function getProfileApi() {
+  if (USE_MOCK) return mockDelay(null);
+  return apiFetch("/profile");
+}
+
+// PUT /profile — 프로필 전체 저장(덮어쓰기).
+export function saveProfileApi(next) {
+  if (USE_MOCK) return mockDelay(next);
+  return apiFetch("/profile", { method: "PUT", body: next });
+}
