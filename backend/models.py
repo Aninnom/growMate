@@ -144,6 +144,25 @@ DEFAULT_SETTINGS = {
     "chat": {"saveHistory": True, "tone": "따뜻하게", "nickname": ""},
 }
 
+# 식물 프로필 (프론트 useProfile.js DEFAULT_PROFILE 과 동일).
+# 적정 환경 범위(preferences)는 센서 상태/표정 판단의 단일 기준이 된다.
+DEFAULT_PROFILE = {
+    "name": "그로우메이트",
+    "species": "몬스테라",
+    "avatar": "happy",
+    "adoptionDate": "",
+    "preferences": {
+        "tempMin": 18,
+        "tempMax": 28,
+        "humidityMin": 60,
+        "humidityMax": 80,
+        "soilMoistureMin": 40,
+        "soilMoistureMax": 70,
+        "wateringCycle": 7,
+        "lightLevel": "보통",
+    },
+}
+
 DEFAULT_SUGGESTIONS = [
     {"id": "water", "type": "water"},
     {"id": "light", "type": "light"},
@@ -173,6 +192,9 @@ def seed_defaults() -> None:
         for group, val in DEFAULT_SETTINGS.items():
             if db.get(Setting, group) is None:
                 db.add(Setting(key=group, value=json.dumps(val, ensure_ascii=False)))
+        # 프로필도 settings 테이블의 "profile" 그룹으로 영속화
+        if db.get(Setting, "profile") is None:
+            db.add(Setting(key="profile", value=json.dumps(DEFAULT_PROFILE, ensure_ascii=False)))
         for s in DEFAULT_SUGGESTIONS:
             if db.get(Suggestion, s["id"]) is None:
                 db.add(Suggestion(id=s["id"], type=s["type"], status="active"))
