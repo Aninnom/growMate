@@ -10,6 +10,7 @@ Growmate LLM 백엔드 (Google Gemini API)
 import asyncio
 import json
 import os
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -33,7 +34,7 @@ try:
     from models import (
         ChatMessage, Setting, Suggestion, seed_defaults,
         Plant, PlantSpecies, WaterLog, LedLog, SensorData, SensorLatest, Alert,
-        SensorHealth, DEFAULT_PLANT_ID,
+        SensorHealth, DEFAULT_PLANT_ID, DEFAULT_PROFILE,
     )
 except ModuleNotFoundError:
     from backend.database import Base, engine, get_db, SessionLocal
@@ -41,7 +42,7 @@ except ModuleNotFoundError:
     from backend.models import (
         ChatMessage, Setting, Suggestion, seed_defaults,
         Plant, PlantSpecies, WaterLog, LedLog, SensorData, SensorLatest, Alert,
-        SensorHealth, DEFAULT_PLANT_ID,
+        SensorHealth, DEFAULT_PLANT_ID, DEFAULT_PROFILE,
     )
 
 load_dotenv()
@@ -60,6 +61,9 @@ if not GEMINI_API_KEY:
     )
 
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+# LLM이 마지막으로 출력한 감정 태그를 메모리에 보관 (라즈베리파이 LCD 표정용)
+_current_llm_mood: str = "happy"
 
 app = FastAPI(title="Growmate LLM (Gemini)")
 
@@ -123,6 +127,9 @@ def build_system_prompt(s: Optional[Sensor], profile: Optional[PlantProfile] = N
         "- 챗봇 말투(저는, ~입니다, 무엇을 도와드릴까요) 절대 금지\n"
         "- 사용자가 힘들어하면 먼저 따뜻하게 공감하고 위로해줘\n"
         "- 영어 금지, 한국어만\n"
+        "- 응답 맨 마지막에 반드시 감정 태그를 붙여: [MOOD:happy] [MOOD:sad] [MOOD:thirsty] [MOOD:angry] 중 하나\n"
+        "  happy=기분 좋음, sad=슬프거나 우울함, thirsty=목마르거나 물/영양 부족, angry=화나거나 짜증나거나 더움\n"
+        "  태그는 한 줄 전체를 차지하고 대화문에 포함하지 마\n"
     )
 
     status = ""
@@ -273,14 +280,21 @@ async def chat(req: ChatRequest):
                     # 누적 전체 텍스트를 done 이벤트에 같이 실어 보낸다.
                     # 프론트가 누락된 끝 토큰이 있으면 이걸로 보정.
                     reply = "".join(full_text)
+                    # LLM 감정 태그 파싱 → 메모리에 보관(라즈베리파이 LCD 표정용),
+                    # 본문에선 태그를 제거해 프론트로 보낸다.
+                    global _current_llm_mood
+                    mood_match = re.search(r'\[MOOD:(happy|sad|thirsty|angry)\]', reply)
+                    if mood_match:
+                        _current_llm_mood = mood_match.group(1)
+                    clean_reply = re.sub(r'\s*\[MOOD:[^\]]+\]', '', reply).strip()
                     # 응답이 정상적으로 생성됐을 때만 (사용자 메시지 + 식물 응답) 함께 저장.
                     # 에러로 빈 응답이면 저장하지 않아 외톨이 메시지를 남기지 않는다.
-                    if reply.strip():
-                        await asyncio.to_thread(save_chat_pair, req.message, reply)
+                    if clean_reply:
+                        await asyncio.to_thread(save_chat_pair, req.message, clean_reply)
                         # 대화에 식물이 응답 = 교감하는 기분 좋은 순간 → 잎 모션 1회.
                         with _control_lock:
                             _control["motor_shake"] = True
-                    payload = {"done": True, "full": reply}
+                    payload = {"done": True, "full": clean_reply, "mood": _current_llm_mood}
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
                     await asyncio.sleep(0)  # flush 보장
                     return
@@ -316,12 +330,18 @@ async def chat_simple(req: ChatRequest):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@app.get("/api/mood")
+def get_mood():
+    """라즈베리파이/프론트가 폴링 → 현재 LLM 감정 상태(마지막 대화 기준)."""
+    return {"mood": _current_llm_mood}
+
+
 # ── 설정 (DB 영속화) ────────────────────────────────────────────
 @app.get("/api/settings")
 def get_settings(db: Session = Depends(get_db)):
-    """전체 설정 조회 → {notify:{...}, care:{...}, chat:{...}}"""
+    """전체 설정 조회 → {notify:{...}, care:{...}, chat:{...}} (profile 제외)"""
     rows = db.query(Setting).all()
-    return {r.key: json.loads(r.value) for r in rows}
+    return {r.key: json.loads(r.value) for r in rows if r.key != "profile"}
 
 
 @app.patch("/api/settings")
@@ -341,6 +361,33 @@ def patch_settings(patch: dict = Body(...), db: Session = Depends(get_db)):
             db.add(Setting(key=group, value=new_value))
     db.commit()
     return get_settings(db)
+
+
+# ── 식물 프로필 (DB 영속화) ─────────────────────────────────────
+def _load_profile(db: Session) -> dict:
+    """저장된 프로필 반환 (없으면 기본값). 적정 환경 범위(preferences)는
+    라즈베리파이 LCD 표정(display-mood) 판단의 기준이 된다."""
+    row = db.get(Setting, "profile")
+    return json.loads(row.value) if row else DEFAULT_PROFILE
+
+
+@app.get("/api/profile")
+def get_profile(db: Session = Depends(get_db)):
+    """식물 프로필(이름·종·적정 환경 범위) 조회."""
+    return _load_profile(db)
+
+
+@app.put("/api/profile")
+def put_profile(profile: dict = Body(...), db: Session = Depends(get_db)):
+    """프로필 전체 저장(덮어쓰기). 적정 범위(preferences)가 표정 판단에 쓰인다."""
+    row = db.get(Setting, "profile")
+    new_value = json.dumps(profile, ensure_ascii=False)
+    if row:
+        row.value = new_value
+    else:
+        db.add(Setting(key="profile", value=new_value))
+    db.commit()
+    return _load_profile(db)
 
 
 # ── 홈 제안 (DB 영속화) ─────────────────────────────────────────
@@ -561,6 +608,53 @@ def get_sensors(db: Session = Depends(get_db)):
                 "updatedAt": _iso(latest.updated_at),
             })
     return {"sensors": sensors}
+
+
+# ── 라즈베리파이 LCD 표정 (센서 환경 기반) ─────────────────────
+LIGHT_MIN_LUX = {"낮음": 150, "보통": 400, "높음": 900}
+
+
+def _min_lux(prefs: dict) -> float:
+    return LIGHT_MIN_LUX.get(prefs.get("lightLevel", "보통"), 400)
+
+
+def determine_display_mood(readings: dict, prefs: dict) -> str:
+    """센서값 + 프로필 적정 범위 → LCD 표정(mood). 모든 기준은 prefs(프로필)에서 온다.
+    우선순위: 토양건조 > 고온 > 저온 > 조도부족 > 과습/습도이상 > 적정(happy)."""
+    soil = readings.get("soil")
+    temp = readings.get("temp")
+    humid = readings.get("humid")
+    light = readings.get("light")
+    if soil is not None and soil < prefs["soilMoistureMin"]:
+        return "thirsty"                       # 토양 건조
+    if temp is not None and temp > prefs["tempMax"]:
+        return "hot"                           # 고온
+    if temp is not None and temp < prefs["tempMin"]:
+        return "cold"                          # 저온
+    if light is not None and light < _min_lux(prefs):
+        return "sad"                           # 조도 부족
+    if (soil is not None and soil > prefs["soilMoistureMax"]) or \
+       (humid is not None and not (prefs["humidityMin"] <= humid <= prefs["humidityMax"])):
+        return "angry"                         # 과습 · 습도 이상
+    return "happy"                             # 모든 조건 적정
+
+
+@app.get("/api/display-mood")
+def get_display_mood(db: Session = Depends(get_db)):
+    """라즈베리파이가 폴링 → '센서 환경 상태' 기반 LCD 표정.
+    프로필 적정 범위(/api/profile)로 판단 (챗봇 LLM 감정 /api/mood 과 무관).
+    실측값은 우리 스키마의 sensor_latest 에서 읽는다."""
+    prefs = _load_profile(db)["preferences"]
+    latest = db.get(SensorLatest, DEFAULT_PLANT_ID)
+    readings = {}
+    if latest is not None:
+        readings = {
+            "soil": latest.soil_moisture,
+            "temp": latest.temperature,
+            "humid": latest.humidity,
+            "light": latest.light,
+        }
+    return {"mood": determine_display_mood(readings, prefs)}
 
 
 # ── 센서 상태 확인 (설정 > 센서 상태 확인) ──────────────────────
