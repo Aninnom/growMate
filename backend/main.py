@@ -390,29 +390,65 @@ def put_profile(profile: dict = Body(...), db: Session = Depends(get_db)):
     return _load_profile(db)
 
 
-# ── 홈 제안 (DB 영속화) ─────────────────────────────────────────
+# ── 홈 제안 (센서 조건 기반) ─────────────────────────────────────
+# 사용자가 [물 주기]/[LED]/[나중에] 로 처리하면 그 저조 구간 동안은 다시 안 뜬다(snoozed).
+# 센서가 회복되면 inactive 로 풀려, 다음에 또 낮아지면 자동으로 다시 뜬다.
+# (구버전의 resolved/dismissed 는 스누즈로 보지 않는다 → 조건이 맞으면 즉시 다시 뜬다.)
+_SNOOZED_STATES = {"snoozed"}
+
+
+def _active_suggestion_types(latest, prefs: dict) -> set:
+    """지금 '필요한' 제안 종류. 토양 < soilMoistureMin → water, 조도 < 기준 lux → light."""
+    types = set()
+    if latest is None:
+        return types
+    if latest.soil_moisture is not None and latest.soil_moisture < prefs["soilMoistureMin"]:
+        types.add("water")
+    if latest.light is not None and latest.light < _min_lux(prefs):
+        types.add("light")
+    return types
+
+
 @app.get("/api/suggestions")
 def list_suggestions(db: Session = Depends(get_db)):
-    """현재 활성 제안만 반환. 한 번 처리(물 주기/LED/나중에)하면 다시 안 뜬다."""
-    rows = db.query(Suggestion).filter(Suggestion.status == "active").all()
-    return {"suggestions": [{"id": r.id, "type": r.type} for r in rows]}
+    """센서 최신값 + 프로필 적정범위로 매번 판정해, '지금 필요한' 제안만 반환한다.
+    - 조건 충족(토양 건조/조도 부족)이고 아직 처리·미룸 전이면 → 말풍선 등장.
+    - 처리/미룸(snoozed) 했으면 그 저조 구간 동안 숨김 유지.
+    - 조건 해제(센서 회복)되면 inactive 로 초기화 → 다음에 또 낮아지면 다시 뜬다."""
+    prefs = _load_profile(db)["preferences"]
+    latest = db.get(SensorLatest, DEFAULT_PLANT_ID)
+    active_now = _active_suggestion_types(latest, prefs)
+
+    out = []
+    for row in db.query(Suggestion).all():
+        if row.type not in active_now:
+            # 조건 해제 → 다음 발생을 위해 스누즈/활성 표시 초기화
+            if row.status != "inactive":
+                row.status = "inactive"
+            continue
+        if row.status in _SNOOZED_STATES:
+            continue  # 이번 저조 구간에서 이미 처리/미룸 → 숨김 유지
+        row.status = "active"
+        out.append({"id": row.id, "type": row.type})
+    db.commit()
+    return {"suggestions": out}
 
 
 @app.post("/api/suggestions/{sid}/dismiss")
 def dismiss_suggestion(sid: str, db: Session = Depends(get_db)):
-    """[나중에] — 제안을 숨김 처리."""
+    """[나중에] — 이번 저조 구간 동안만 숨김(snoozed). 센서가 회복되면 자동 해제."""
     row = db.get(Suggestion, sid)
     if row is not None:
-        row.status = "dismissed"
+        row.status = "snoozed"
         db.commit()
     return {"ok": True}
 
 
 @app.post("/api/suggestions/reset")
 def reset_suggestions(db: Session = Depends(get_db)):
-    """데모용: 모든 제안을 다시 active 로 되돌린다."""
+    """데모용: 스누즈를 모두 해제(inactive) → 조건이 충족돼 있으면 즉시 다시 뜬다."""
     for row in db.query(Suggestion).all():
-        row.status = "active"
+        row.status = "inactive"
     db.commit()
     return {"ok": True}
 
@@ -475,7 +511,7 @@ def action_water(body: WaterBody, db: Session = Depends(get_db)):
     if body.suggestionId:
         row = db.get(Suggestion, body.suggestionId)
         if row is not None:
-            row.status = "resolved"
+            row.status = "snoozed"   # 이번 저조 구간 동안 숨김. 센서 회복 후 또 마르면 다시 뜸.
     db.commit()
     # 하드웨어: 다음 폴링에서 파이가 sec 초간 펌프 가동 + 잎 모션(1회). 여러 번 눌러도 누적되지 않음.
     with _control_lock:
@@ -492,7 +528,7 @@ def action_led(body: LedBody, db: Session = Depends(get_db)):
     if body.suggestionId:
         row = db.get(Suggestion, body.suggestionId)
         if row is not None:
-            row.status = "resolved"
+            row.status = "snoozed"   # 이번 저조 구간 동안 숨김. 조도 회복 후 또 어두우면 다시 뜸.
     db.commit()
     # 하드웨어: LED 지속 상태 갱신 → 파이가 매 폴링마다 릴레이를 이 상태로 맞춘다.
     # LED 켜기는 기분 좋은 순간 → 잎 모션 1회(끌 때는 안 흔든다).

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import PlantCharacter from "@/components/PlantCharacter";
 import SpeechBubble from "@/components/SpeechBubble";
 import SensorCard from "@/components/SensorCard";
@@ -36,17 +36,8 @@ export default function HomePage() {
   // 직접 제어 버튼 중복 클릭 방지(요청 진행 중 비활성화)
   const [watering, setWatering] = useState(false);
   const [ledBusy, setLedBusy] = useState(false);
-
-  // 활성 제안을 백엔드에서 불러온다. 처리한 제안은 서버에서 빠지므로 다시 뜨지 않는다.
-  useEffect(() => {
-    let alive = true;
-    getSuggestions()
-      .then((list) => alive && setSuggestions(list))
-      .catch((e) => console.error("제안 불러오기 실패:", e));
-    return () => {
-      alive = false;
-    };
-  }, []);
+  // 사용자가 방금 처리(물주기/LED/나중에) 중인 제안 id — 폴링이 되살리지 못하게 잠깐 가린다.
+  const handlingRef = useRef(new Set());
 
   // 현재 LED 상태를 불러와 버튼을 복원한다. → 켜둔 채 다른 탭 갔다 와도 ON 유지.
   useEffect(() => {
@@ -59,14 +50,24 @@ export default function HomePage() {
     };
   }, []);
 
-  // 센서 원시값을 주기적으로 폴링 → 라즈베리파이가 보낸 최신값이 홈에 반영된다.
-  // 상태/권장범위 판정은 식물 프로필의 선호(profile.preferences)로 화면에서 계산한다.
+  // 센서 원시값 + 제안을 주기적으로 폴링한다.
+  // - 센서: 라즈베리파이가 보낸 최신값이 홈에 반영된다.
+  // - 제안: 백엔드가 센서 조건(토양 건조/조도 부족)으로 매번 판정하므로, 값이 낮아지면
+  //   말풍선이 자동으로 다시 뜬다(마운트 1회만 불러오면 안 됨).
   useEffect(() => {
     let alive = true;
-    const load = () =>
+    const load = () => {
       getSensorReadings()
         .then((r) => alive && setReadings(r))
         .catch((e) => console.error("센서 불러오기 실패:", e));
+      getSuggestions()
+        .then((list) => {
+          if (!alive) return;
+          // 방금 처리 중인 제안은 폴링 결과에서 제외해 깜빡임/되살아남을 막는다.
+          setSuggestions(list.filter((s) => !handlingRef.current.has(s.id)));
+        })
+        .catch((e) => console.error("제안 불러오기 실패:", e));
+    };
     load();
     const timer = setInterval(load, SENSOR_POLL_MS);
     return () => {
@@ -86,6 +87,8 @@ export default function HomePage() {
   async function resolveSuggestion(id, accepted) {
     const item = suggestions.find((s) => s.id === id);
     if (!item) return;
+    // 처리 중 표시 → 진행 중 폴링이 이 제안을 되살리지 못하게 한다.
+    handlingRef.current.add(id);
     // 낙관적으로 먼저 화면에서 제거 (서버 저장은 비동기로 진행)
     setSuggestions((prev) => prev.filter((s) => s.id !== id));
     try {
@@ -109,6 +112,9 @@ export default function HomePage() {
       setSuggestions((prev) => (prev.some((s) => s.id === id) ? prev : [...prev, item]));
       setToast("처리 중 문제가 생겼어요. 잠시 후 다시 시도해 주세요.");
       setTimeout(() => setToast(null), 2600);
+    } finally {
+      // 서버 저장이 끝났으니 가림 해제 — 이후 조건이 다시 충족되면 폴링이 정상적으로 다시 띄운다.
+      handlingRef.current.delete(id);
     }
   }
 
